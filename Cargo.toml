@@ -1,0 +1,12 @@
+[package]
+name = "exifrename"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.68"
+glob = "0.3.0"
+kamadak-exif = "0.5.5"
+tempfile = "3.3.0"
