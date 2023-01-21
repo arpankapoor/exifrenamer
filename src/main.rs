@@ -1,37 +1,76 @@
-use anyhow::{anyhow, Context};
-use exif::DateTime;
-use exif::{In, Tag, Value};
+use anyhow::{bail, Context};
+use exif::{DateTime, In, Tag, Value};
 use glob::{glob_with, MatchOptions};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{File, Permissions};
 use std::hash::{Hash, Hasher};
 use std::io::BufReader;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::time::SystemTime;
+use time::macros::format_description;
+use time::{Date, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 struct ImageFile {
     path: PathBuf,
-    datetime: DateTime,
+    datetime: OffsetDateTime,
 }
 
 impl TryFrom<PathBuf> for ImageFile {
     type Error = anyhow::Error;
+
     fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
         let mut bufreader = BufReader::new(File::open(path.as_path())?);
         let exifreader = exif::Reader::new();
         let exif = exifreader
             .read_from_container(&mut bufreader)
             .with_context(|| format!("unable to read exif in {}", path.display()))?;
-        let datetime =
+        let mut exif_datetime =
             match exif.get_field(Tag::DateTimeOriginal, In::PRIMARY) {
                 Some(field) => match &field.value {
                     Value::Ascii(s) => DateTime::from_ascii(s.first().with_context(|| {
                         format!("date field value missing in {}", path.display())
-                    })?),
-                    _ => Err(anyhow!("invalid date field in {}", path.display()))?,
+                    })?)?,
+                    _ => bail!("invalid date field in {}", path.display()),
                 },
-                None => Err(anyhow!("missing date field in {}", path.display()))?,
-            }?;
+                None => bail!("missing date field in {}", path.display()),
+            };
+
+        if let Some(field) = exif.get_field(Tag::OffsetTimeOriginal, In::PRIMARY) {
+            if let Value::Ascii(s) = &field.value {
+                // ignore any errors
+                let _ = exif_datetime.parse_offset(s.first().unwrap());
+            }
+        }
+
+        if let Some(field) = exif.get_field(Tag::SubSecTimeOriginal, In::PRIMARY) {
+            if let Value::Ascii(s) = &field.value {
+                // ignore any errors
+                let _ = exif_datetime.parse_subsec(s.first().unwrap());
+            }
+        }
+
+        let date = Date::from_calendar_date(
+            exif_datetime.year.into(),
+            exif_datetime.month.try_into()?,
+            exif_datetime.day,
+        )?;
+
+        let time = Time::from_hms_nano(
+            exif_datetime.hour,
+            exif_datetime.minute,
+            exif_datetime.second,
+            exif_datetime.nanosecond.unwrap_or_default(),
+        )?;
+
+        // try to extract from image or locally or else assume UTC
+        let offset = match exif_datetime.offset {
+            Some(offset_minutes) => UtcOffset::from_whole_seconds(60i32 * offset_minutes as i32)?,
+            None => UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC),
+        };
+
+        let datetime = PrimitiveDateTime::new(date, time).assume_offset(offset);
 
         Ok(Self { path, datetime })
     }
@@ -39,20 +78,7 @@ impl TryFrom<PathBuf> for ImageFile {
 
 impl Ord for ImageFile {
     fn cmp(&self, other: &Self) -> Ordering {
-        let sdt = &self.datetime;
-        let odt = &other.datetime;
-        (
-            sdt.year, sdt.month, sdt.day, sdt.hour, sdt.minute, sdt.second, &self.path,
-        )
-            .cmp(&(
-                odt.year,
-                odt.month,
-                odt.day,
-                odt.hour,
-                odt.minute,
-                odt.second,
-                &other.path,
-            ))
+        self.datetime.cmp(&other.datetime)
     }
 }
 
@@ -73,8 +99,7 @@ impl Eq for ImageFile {}
 impl Hash for ImageFile {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.path.hash(state);
-        let dt = &self.datetime;
-        (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second).hash(state);
+        self.datetime.hash(state);
     }
 }
 
@@ -99,7 +124,7 @@ fn main() -> anyhow::Result<()> {
 
     image_files.sort();
 
-    let years: HashSet<u16> = image_files.iter().map(|imf| imf.datetime.year).collect();
+    let years: HashSet<_> = image_files.iter().map(|imf| imf.datetime.year()).collect();
 
     let tmp_dir = tempfile::Builder::new()
         .prefix("organized")
@@ -113,30 +138,29 @@ fn main() -> anyhow::Result<()> {
     let new_names_map = image_files
         .into_iter()
         .scan(
-            (1u32, None::<DateTime>),
+            (1u32, None::<OffsetDateTime>),
             |(prev_idx, prev_dt_option), imf| {
                 let curr_dt = &imf.datetime;
                 let mut curr_idx = 1;
                 if let Some(prev_dt) = prev_dt_option {
-                    if (curr_dt.year, curr_dt.month, curr_dt.day)
-                        == (prev_dt.year, prev_dt.month, prev_dt.day)
-                    {
+                    if curr_dt.date() == prev_dt.date() {
                         curr_idx = *prev_idx + 1;
                     }
                 }
 
                 *prev_idx = curr_idx;
-                *prev_dt_option = Some(DateTime { ..*curr_dt });
+                *prev_dt_option = Some(*curr_dt);
 
-                let new_path = tmp_dir.join(format!(
-                    "{:04}/{:04}-{:02}-{:02}_{:05}.{}",
-                    curr_dt.year,
-                    curr_dt.year,
-                    curr_dt.month,
-                    curr_dt.day,
-                    curr_idx,
-                    imf.path.extension().unwrap().to_str().unwrap()
-                ));
+                let new_path = tmp_dir
+                    .join(curr_dt.format(format_description!("[year]")).unwrap())
+                    .join(format!(
+                        "{}_{:05}.{}",
+                        curr_dt
+                            .format(format_description!("[year]-[month]-[day]"))
+                            .unwrap(),
+                        curr_idx,
+                        imf.path.extension().unwrap().to_str().unwrap()
+                    ));
 
                 Some((imf, new_path))
             },
@@ -145,7 +169,9 @@ fn main() -> anyhow::Result<()> {
 
     for (imf, new_path) in new_names_map {
         println!("{} -> {}", imf.path.display(), new_path.display());
-        std::fs::rename(imf.path, new_path)?;
+        std::fs::rename(imf.path, &new_path)?;
+        std::fs::set_permissions(&new_path, Permissions::from_mode(0o644))?;
+        filetime::set_file_mtime(new_path, SystemTime::from(imf.datetime).into())?;
     }
 
     Ok(())
