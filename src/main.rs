@@ -115,6 +115,7 @@ fn main() -> anyhow::Result<()> {
 
     let image_paths = glob_with(&format!("{}/**/*.jpg", base_dir), options)?
         .chain(glob_with(&format!("{}/**/*.png", base_dir), options)?)
+        .chain(glob_with(&format!("{}/**/*.heic", base_dir), options)?)
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut image_files = image_paths
@@ -169,9 +170,9 @@ fn main() -> anyhow::Result<()> {
 
     for (imf, new_path) in new_names_map {
         println!("{} -> {}", imf.path.display(), new_path.display());
-        std::fs::rename(imf.path, &new_path)?;
-        std::fs::set_permissions(&new_path, Permissions::from_mode(0o644))?;
-        filetime::set_file_mtime(new_path, SystemTime::from(imf.datetime).into())?;
+        std::fs::set_permissions(&imf.path, Permissions::from_mode(0o644))?;
+        filetime::set_file_mtime(&imf.path, SystemTime::from(imf.datetime).into())?;
+        std::fs::rename(imf.path, &new_path).context("failed to do above rename")?;
     }
 
     Ok(())
