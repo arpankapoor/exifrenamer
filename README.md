@@ -1,7 +1,7 @@
 # exif renamer
 
 this program
-- parses the EXIF tag `DateTimeOriginal` (and `OffsetTimeOriginal` and `SubSecTimeOriginal` if present) from all `.jpg` and `.png` image files
+- parses the EXIF tag `DateTimeOriginal` (and `OffsetTimeOriginal` and `SubSecTimeOriginal` if present) from all `.jpg`, `.png` and `.heic` image files
   in the directory given as command line argument
 - moves them to the directory `organizedRANDOMGIBBERISH/year`
 - renames them to `YYYY-MM-DD_XXXXX.ext` where `XXXXX` is a zero-padded number starting from 1, sorted according to the extracted time
