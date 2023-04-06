@@ -160,7 +160,7 @@ fn main() -> anyhow::Result<()> {
                             .format(format_description!("[year]-[month]-[day]"))
                             .unwrap(),
                         curr_idx,
-                        imf.path.extension().unwrap().to_str().unwrap()
+                        imf.path.extension().unwrap().to_str().unwrap().to_ascii_lowercase()
                     ));
 
                 Some((imf, new_path))
